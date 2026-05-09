@@ -105,6 +105,7 @@ let history = loadHistory();
 let tickHandle = null;
 let lastSaved = "";
 let lastHistorySaved = "";
+let audioContext = null;
 
 function player(name) {
   return { id: crypto.randomUUID(), name, active: true, rebuys: 0, addons: 0 };
@@ -226,6 +227,7 @@ function tournamentView() {
             ${numberInput("Warnung Sekunden", "tournament.warningSeconds", t.warningSeconds)}
             <label class="checkline full"><input type="checkbox" data-path="tournament.useAnte" ${t.useAnte ? "checked" : ""}> Antes aktivieren</label>
             <label class="checkline full"><input type="checkbox" data-path="tournament.sound" ${t.sound ? "checked" : ""}> Sound aktivieren</label>
+            <button class="full" data-action="testSound">Sound testen</button>
           </div>
         </section>
         <section class="section">
@@ -527,7 +529,11 @@ function handleAction(el) {
   if (action === "setMode") state.mode = el.dataset.mode;
   if (action === "toggleTheme") state.theme = state.theme === "dark" ? "light" : "dark";
   if (action === "toggleTv") state.tvMode = !state.tvMode;
-  if (action === "toggleTimer") state.tournament.running = !state.tournament.running;
+  if (action === "toggleTimer") {
+    unlockAudio();
+    state.tournament.running = !state.tournament.running;
+  }
+  if (action === "testSound") playLevelEndSound();
   if (action === "resetTimer") resetCurrentLevel();
   if (action === "nextLevel") moveLevel(1);
   if (action === "prevLevel") moveLevel(-1);
@@ -542,7 +548,10 @@ function handleAction(el) {
   if (action === "addonPlayer") state.tournament.players[Number(el.dataset.index)].addons += 1;
   if (action === "addPayout") state.tournament.payouts.push({ place: state.tournament.payouts.length + 1, percent: 0 });
   if (action === "removePayout") state.tournament.payouts.splice(Number(el.dataset.index), 1);
-  if (action === "toggleCashTimer") state.cashgame.running = !state.cashgame.running;
+  if (action === "toggleCashTimer") {
+    unlockAudio();
+    state.cashgame.running = !state.cashgame.running;
+  }
   if (action === "resetCashTimer") state.cashgame.elapsedSeconds = 0;
   if (action === "addCashPlayer") addCashPlayer();
   if (action === "removeCashPlayer") state.cashgame.players.splice(Number(el.dataset.index), 1);
@@ -782,9 +791,9 @@ function calculatePrizePool(t) {
 function tick() {
   if (state.tournament.running) {
     state.tournament.remainingSeconds -= 1;
-    if (state.tournament.remainingSeconds === state.tournament.warningSeconds && state.tournament.sound) beep(520, 0.12);
+    if (state.tournament.remainingSeconds === state.tournament.warningSeconds && state.tournament.sound) playWarningSound();
     if (state.tournament.remainingSeconds <= 0) {
-      if (state.tournament.sound) beep(220, 0.28);
+      if (state.tournament.sound) playLevelEndSound();
       if (state.tournament.currentLevel < state.tournament.levels.length - 1) advanceLevel();
       else state.tournament.running = false;
     }
@@ -794,7 +803,7 @@ function tick() {
     state.cashgame.elapsedSeconds += 1;
     if (state.cashgame.timerMinutes > 0 && state.cashgame.elapsedSeconds >= state.cashgame.timerMinutes * 60) {
       state.cashgame.running = false;
-      beep(260, 0.25);
+      playLevelEndSound();
     }
     render();
   }
@@ -805,20 +814,55 @@ function startTicking() {
   tickHandle = setInterval(tick, 1000);
 }
 
-function beep(frequency, duration) {
+function unlockAudio() {
   try {
-    const ctx = new AudioContext();
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!audioContext) audioContext = new AudioCtx();
+    if (audioContext.state === "suspended") audioContext.resume();
+    return audioContext;
+  } catch {
+    return null;
+  }
+}
+
+function playWarningSound() {
+  beepSequence([
+    { frequency: 660, duration: 0.1 },
+    { frequency: 880, duration: 0.1, delay: 0.14 }
+  ]);
+}
+
+function playLevelEndSound() {
+  beepSequence([
+    { frequency: 330, duration: 0.18 },
+    { frequency: 220, duration: 0.28, delay: 0.22 },
+    { frequency: 165, duration: 0.36, delay: 0.55 }
+  ]);
+}
+
+function beepSequence(notes) {
+  const ctx = unlockAudio();
+  if (!ctx) return;
+  notes.forEach((note) => beep(note.frequency, note.duration, note.delay || 0));
+}
+
+function beep(frequency, duration, delay = 0) {
+  try {
+    const ctx = unlockAudio();
+    if (!ctx) return;
+    const start = ctx.currentTime + delay;
     const oscillator = ctx.createOscillator();
     const gain = ctx.createGain();
+    oscillator.type = "square";
+    oscillator.frequency.value = frequency;
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(0.09, start + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
     oscillator.connect(gain);
     gain.connect(ctx.destination);
-    oscillator.frequency.value = frequency;
-    gain.gain.value = 0.08;
-    oscillator.start();
-    setTimeout(() => {
-      oscillator.stop();
-      ctx.close();
-    }, duration * 1000);
+    oscillator.start(start);
+    oscillator.stop(start + duration + 0.03);
   } catch {}
 }
 
