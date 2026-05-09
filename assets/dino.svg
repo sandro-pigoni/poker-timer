@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Chrome Dino Logo">
+  <rect width="512" height="512" rx="104" fill="#0b1118"/>
+  <path fill="#20c997" transform="translate(26 30) scale(.9)" d="M0,420h32v8H0V420z M112,420h16v8h-16V420z M384,420h32v8h-32V420z M320,252h-16v56h-16v24h-16v16h-16v64h16v16h-32v-48h-16v-16h-16v16h-16v16h-16v16h16v16h-32v-64h-16v-16h-16v-16h-16v-16H96v-16H80v-96h16v32h16v16h16v16h32v-16h16v-16h24v-16h24v-16h16V100h16V84h128v16h16v72h-80v16h48v16h-64v32h32v32h-16V252z M328,412h8v8h-8V412z M48,396h32v8H48V396z M440,388h24v8h-24V388z M0,364h128v8H0V364z M288,364h224v8H288V364z M272,108v16h16v-16H272z"/>
+</svg>
