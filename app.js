@@ -1,5 +1,41 @@
 const STORAGE_KEY = "homegame-poker-timer-v1";
 const HISTORY_KEY = "poker-timer-history-v1";
+const MAX_LEVELS = 80;
+const MAX_PLAYERS = 200;
+const MAX_PAYOUTS = 20;
+const MAX_TEXT_LENGTH = 120;
+
+const numberRules = {
+  "tournament.buyIn": { min: 0, max: 100000 },
+  "tournament.rake": { min: 0, max: 100000 },
+  "tournament.startingStack": { min: 1, max: 100000000 },
+  "tournament.rebuyPrice": { min: 0, max: 100000 },
+  "tournament.rebuyStack": { min: 0, max: 100000000 },
+  "tournament.addOnPrice": { min: 0, max: 100000 },
+  "tournament.addOnStack": { min: 0, max: 100000000 },
+  "tournament.rebuyUntilLevel": { min: 0, max: MAX_LEVELS },
+  "tournament.warningSeconds": { min: 0, max: 3600 },
+  "cashgame.smallBlind": { min: 0, max: 100000 },
+  "cashgame.bigBlind": { min: 0, max: 100000 },
+  "cashgame.timerMinutes": { min: 0, max: 1440 }
+};
+
+const levelNumberRules = {
+  minutes: { min: 1, max: 240 },
+  smallBlind: { min: 0, max: 100000000 },
+  bigBlind: { min: 0, max: 100000000 },
+  ante: { min: 0, max: 100000000 }
+};
+
+const payoutNumberRules = {
+  place: { min: 1, max: MAX_PAYOUTS },
+  percent: { min: 0, max: 100 }
+};
+
+const cashPlayerNumberRules = {
+  buyIn: { min: 0, max: 1000000 },
+  cashOut: { min: 0, max: 1000000 }
+};
 
 const presets = {
   turbo: {
@@ -106,18 +142,19 @@ let tickHandle = null;
 let lastSaved = "";
 let lastHistorySaved = "";
 let audioContext = null;
+let lastTickAt = Date.now();
 
 function player(name) {
-  return { id: crypto.randomUUID(), name, active: true, rebuys: 0, addons: 0 };
+  return { id: makeId(), name, active: true, rebuys: 0, addons: 0 };
 }
 
 function cashPlayer(name, buyIn, cashOut) {
-  return { id: crypto.randomUUID(), name, buyIn, cashOut };
+  return { id: makeId(), name, buyIn, cashOut };
 }
 
 function mapPresetLevels(rows) {
   return rows.map((row, index) => ({
-    id: crypto.randomUUID(),
+    id: makeId(),
     name: `${row[5]} ${index + 1}`,
     minutes: row[0],
     smallBlind: row[1],
@@ -131,9 +168,9 @@ function mapPresetLevels(rows) {
 function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    return saved ? mergeDefaults(defaultState, saved) : structuredClone(defaultState);
+    return sanitizeState(saved ? mergeDefaults(defaultState, saved) : structuredClone(defaultState));
   } catch {
-    return structuredClone(defaultState);
+    return sanitizeState(structuredClone(defaultState));
   }
 }
 
@@ -147,8 +184,147 @@ function mergeDefaults(base, saved) {
   return result;
 }
 
+function sanitizeState(value) {
+  const normalized = {
+    ...value,
+    mode: value?.mode === "cashgame" ? "cashgame" : "tournament",
+    theme: value?.theme === "light" ? "light" : "dark",
+    tvMode: Boolean(value?.tvMode),
+    preset: presets[value?.preset] ? value.preset : "classic",
+    tournament: normalizeTournament(value?.tournament || defaultState.tournament),
+    cashgame: normalizeCashgame(value?.cashgame || defaultState.cashgame)
+  };
+  return catchUpPersistedTimers(normalized);
+}
+
+function catchUpPersistedTimers(appState) {
+  const savedAt = Date.parse(appState.savedAt || "");
+  if (!Number.isFinite(savedAt)) return appState;
+  const elapsedSeconds = Math.floor((Date.now() - savedAt) / 1000);
+  if (elapsedSeconds <= 0 || elapsedSeconds > 7 * 24 * 60 * 60) return appState;
+  if (appState.tournament.running) advanceTournamentBy(appState.tournament, elapsedSeconds, false);
+  if (appState.cashgame.running) advanceCashgameBy(appState.cashgame, elapsedSeconds, false);
+  return appState;
+}
+
+function normalizeTournament(raw) {
+  const levels = (Array.isArray(raw?.levels) ? raw.levels : [])
+    .map(normalizeLevel)
+    .filter(Boolean)
+    .slice(0, MAX_LEVELS);
+  const safeLevels = levels.length ? levels : mapPresetLevels(presets.classic.levels);
+  const currentLevel = clampInteger(raw?.currentLevel, { min: 0, max: safeLevels.length - 1, fallback: 0 });
+  const fallbackSeconds = clampInteger(safeLevels[currentLevel]?.minutes, { min: 1, max: 240, fallback: 15 }) * 60;
+
+  return {
+    ...raw,
+    title: cleanText(raw?.title, "Samstag Homegame"),
+    buyIn: clampNumber(raw?.buyIn, numberRules["tournament.buyIn"]),
+    rake: clampNumber(raw?.rake, numberRules["tournament.rake"]),
+    startingStack: clampInteger(raw?.startingStack, numberRules["tournament.startingStack"]),
+    rebuyPrice: clampNumber(raw?.rebuyPrice, numberRules["tournament.rebuyPrice"]),
+    rebuyStack: clampInteger(raw?.rebuyStack, numberRules["tournament.rebuyStack"]),
+    addOnPrice: clampNumber(raw?.addOnPrice, numberRules["tournament.addOnPrice"]),
+    addOnStack: clampInteger(raw?.addOnStack, numberRules["tournament.addOnStack"]),
+    rebuyUntilLevel: clampInteger(raw?.rebuyUntilLevel, { ...numberRules["tournament.rebuyUntilLevel"], fallback: 0 }),
+    useAnte: raw?.useAnte !== false,
+    warningSeconds: clampInteger(raw?.warningSeconds, numberRules["tournament.warningSeconds"]),
+    sound: raw?.sound !== false,
+    currentLevel,
+    remainingSeconds: clampInteger(raw?.remainingSeconds, { min: 0, max: 7 * 24 * 60 * 60, fallback: fallbackSeconds }),
+    running: Boolean(raw?.running),
+    levels: safeLevels,
+    players: normalizePlayers(raw?.players),
+    payouts: normalizePayouts(raw?.payouts)
+  };
+}
+
+function normalizeLevel(raw, index) {
+  if (!raw || typeof raw !== "object") return null;
+  const type = raw.type === "break" ? "break" : "level";
+  return {
+    id: raw.id || makeId(),
+    name: cleanText(raw.name, type === "break" ? "Pause" : `Level ${index + 1}`),
+    minutes: clampInteger(raw.minutes, { ...levelNumberRules.minutes, fallback: type === "break" ? 10 : 15 }),
+    smallBlind: type === "break" ? 0 : clampInteger(raw.smallBlind, levelNumberRules.smallBlind),
+    bigBlind: type === "break" ? 0 : clampInteger(raw.bigBlind, levelNumberRules.bigBlind),
+    ante: type === "break" ? 0 : clampInteger(raw.ante, levelNumberRules.ante),
+    anteType: type === "break" ? "none" : normalizeChoice(raw.anteType, ["none", "regular", "bb"], "none"),
+    type
+  };
+}
+
+function normalizePlayers(players) {
+  if (!Array.isArray(players)) return [];
+  return players.slice(0, MAX_PLAYERS).map((item, index) => ({
+    id: item?.id || makeId(),
+    name: cleanText(item?.name, `Spieler ${index + 1}`),
+    active: item?.active !== false,
+    rebuys: clampInteger(item?.rebuys, { min: 0, max: 100, fallback: 0 }),
+    addons: clampInteger(item?.addons, { min: 0, max: 100, fallback: 0 })
+  }));
+}
+
+function normalizePayouts(payouts) {
+  if (!Array.isArray(payouts)) return [];
+  return payouts.slice(0, MAX_PAYOUTS).map((item, index) => ({
+    place: clampInteger(item?.place, { ...payoutNumberRules.place, fallback: index + 1 }),
+    percent: clampNumber(item?.percent, payoutNumberRules.percent)
+  }));
+}
+
+function normalizeCashgame(raw) {
+  return {
+    ...raw,
+    title: cleanText(raw?.title, "Cashgame"),
+    smallBlind: clampNumber(raw?.smallBlind, numberRules["cashgame.smallBlind"]),
+    bigBlind: clampNumber(raw?.bigBlind, numberRules["cashgame.bigBlind"]),
+    timerMinutes: clampInteger(raw?.timerMinutes, numberRules["cashgame.timerMinutes"]),
+    running: Boolean(raw?.running),
+    elapsedSeconds: clampInteger(raw?.elapsedSeconds, { min: 0, max: 7 * 24 * 60 * 60, fallback: 0 }),
+    players: normalizeCashPlayers(raw?.players)
+  };
+}
+
+function normalizeCashPlayers(players) {
+  if (!Array.isArray(players)) return [];
+  return players.slice(0, MAX_PLAYERS).map((item, index) => ({
+    id: item?.id || makeId(),
+    name: cleanText(item?.name, `Spieler ${index + 1}`),
+    buyIn: clampNumber(item?.buyIn, cashPlayerNumberRules.buyIn),
+    cashOut: clampNumber(item?.cashOut, cashPlayerNumberRules.cashOut)
+  }));
+}
+
+function clampNumber(value, rule = {}) {
+  const min = rule.min ?? 0;
+  const max = rule.max ?? Number.POSITIVE_INFINITY;
+  const fallback = rule.fallback ?? min;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function clampInteger(value, rule = {}) {
+  return Math.round(clampNumber(value, rule));
+}
+
+function cleanText(value, fallback = "", maxLength = MAX_TEXT_LENGTH) {
+  const text = String(value ?? "").trim();
+  return (text || fallback).slice(0, maxLength);
+}
+
+function normalizeChoice(value, choices, fallback) {
+  return choices.includes(value) ? value : fallback;
+}
+
+function makeId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 function saveState() {
-  const serialized = JSON.stringify(state);
+  const serialized = JSON.stringify({ ...state, savedAt: new Date().toISOString() });
   if (serialized !== lastSaved) {
     localStorage.setItem(STORAGE_KEY, serialized);
     lastSaved = serialized;
@@ -158,7 +334,7 @@ function saveState() {
 function loadHistory() {
   try {
     const saved = JSON.parse(localStorage.getItem(HISTORY_KEY));
-    return Array.isArray(saved) ? saved : [];
+    return Array.isArray(saved) ? mergeHistory(saved.filter((entry) => entry?.tournament), []) : [];
   } catch {
     return [];
   }
@@ -229,6 +405,7 @@ function tournamentView() {
             <label class="checkline full"><input type="checkbox" data-path="tournament.sound" ${t.sound ? "checked" : ""}> Sound aktivieren</label>
             <button class="full" data-action="testSound">Sound testen</button>
           </div>
+          ${tournamentAlerts()}
         </section>
         <section class="section">
           <h3>Presets</h3>
@@ -257,6 +434,7 @@ function tournamentView() {
         <section class="section">
           <h3>Payout</h3>
           <div class="table-wrap">${payoutTable()}</div>
+          ${payoutSummary()}
           <div class="row-actions">
             <button data-action="addPayout">Platz hinzufügen</button>
           </div>
@@ -295,7 +473,7 @@ function timerStage() {
         <span>${level.type === "break" ? "Pause" : `Level ${t.currentLevel + 1}`}</span>
         <span>${next ? `Nächstes: ${nextLabel(next)}` : "Finales Level"}</span>
       </div>
-      <div class="clock ${className}">${formatTime(t.remainingSeconds)}</div>
+      <div class="clock ${className}" aria-live="polite">${formatTime(t.remainingSeconds)}</div>
       <div class="blinds">
         <div class="metric"><span>Small Blind</span><strong>${level.type === "break" ? "-" : fmt(level.smallBlind)}</strong></div>
         <div class="metric"><span>Big Blind</span><strong>${level.type === "break" ? "-" : fmt(level.bigBlind)}</strong></div>
@@ -375,7 +553,14 @@ function input(label, path, value) {
 }
 
 function numberInput(label, path, value) {
-  return `<label>${label}<input type="number" data-path="${path}" value="${value}" /></label>`;
+  return `<label>${label}<input type="number" data-path="${path}" value="${escapeHtml(value)}" ${numberAttrs(numberRules[path])} /></label>`;
+}
+
+function numberAttrs(rule = {}) {
+  const attrs = [];
+  if (rule.min !== undefined) attrs.push(`min="${rule.min}"`);
+  if (rule.max !== undefined && Number.isFinite(rule.max)) attrs.push(`max="${rule.max}"`);
+  return attrs.join(" ");
 }
 
 function levelsTable() {
@@ -383,10 +568,10 @@ function levelsTable() {
     <tr>
       <td>${index + 1}</td>
       <td><select data-level="${index}" data-field="type"><option value="level" ${level.type === "level" ? "selected" : ""}>Level</option><option value="break" ${level.type === "break" ? "selected" : ""}>Pause</option></select></td>
-      <td><input data-level="${index}" data-field="minutes" type="number" value="${level.minutes}"></td>
-      <td><input data-level="${index}" data-field="smallBlind" type="number" value="${level.smallBlind}"></td>
-      <td><input data-level="${index}" data-field="bigBlind" type="number" value="${level.bigBlind}"></td>
-      <td><input data-level="${index}" data-field="ante" type="number" value="${level.ante}"></td>
+      <td><input data-level="${index}" data-field="minutes" type="number" value="${level.minutes}" ${numberAttrs(levelNumberRules.minutes)}></td>
+      <td><input data-level="${index}" data-field="smallBlind" type="number" value="${level.smallBlind}" ${numberAttrs(levelNumberRules.smallBlind)}></td>
+      <td><input data-level="${index}" data-field="bigBlind" type="number" value="${level.bigBlind}" ${numberAttrs(levelNumberRules.bigBlind)}></td>
+      <td><input data-level="${index}" data-field="ante" type="number" value="${level.ante}" ${numberAttrs(levelNumberRules.ante)}></td>
       <td><select data-level="${index}" data-field="anteType"><option value="none" ${level.anteType === "none" ? "selected" : ""}>Aus</option><option value="regular" ${level.anteType === "regular" ? "selected" : ""}>Ante</option><option value="bb" ${level.anteType === "bb" ? "selected" : ""}>BBA</option></select></td>
       <td><button class="icon danger" title="Entfernen" data-action="removeLevel" data-index="${index}">x</button></td>
     </tr>
@@ -414,8 +599,8 @@ function playersList() {
 function payoutTable() {
   const rows = state.tournament.payouts.map((p, index) => `
     <tr>
-      <td><input data-payout="${index}" data-field="place" type="number" value="${p.place}"></td>
-      <td><input data-payout="${index}" data-field="percent" type="number" value="${p.percent}"></td>
+      <td><input data-payout="${index}" data-field="place" type="number" value="${p.place}" ${numberAttrs(payoutNumberRules.place)}></td>
+      <td><input data-payout="${index}" data-field="percent" type="number" value="${p.percent}" ${numberAttrs(payoutNumberRules.percent)}></td>
       <td>${money(prizePool() * num(p.percent) / 100)}</td>
       <td><button class="icon danger" data-action="removePayout" data-index="${index}">x</button></td>
     </tr>
@@ -427,8 +612,8 @@ function cashTable() {
   const rows = state.cashgame.players.map((p, index) => `
     <tr>
       <td><input data-cash-player="${index}" data-field="name" value="${escapeHtml(p.name)}"></td>
-      <td><input data-cash-player="${index}" data-field="buyIn" type="number" value="${p.buyIn}"></td>
-      <td><input data-cash-player="${index}" data-field="cashOut" type="number" value="${p.cashOut}"></td>
+      <td><input data-cash-player="${index}" data-field="buyIn" type="number" value="${p.buyIn}" ${numberAttrs(cashPlayerNumberRules.buyIn)}></td>
+      <td><input data-cash-player="${index}" data-field="cashOut" type="number" value="${p.cashOut}" ${numberAttrs(cashPlayerNumberRules.cashOut)}></td>
       <td>${money(num(p.cashOut) - num(p.buyIn))}</td>
       <td><button class="icon danger" data-action="removeCashPlayer" data-index="${index}">x</button></td>
     </tr>
@@ -447,6 +632,34 @@ function tournamentMetrics() {
     <div class="metric"><span>Chips gesamt</span><strong>${fmt(totalChips)}</strong></div>
     <div class="metric"><span>Average Stack</span><strong>${fmt(active ? Math.round(totalChips / active) : 0)}</strong></div>
   `;
+}
+
+function payoutTotal() {
+  return state.tournament.payouts.reduce((sum, payout) => sum + num(payout.percent), 0);
+}
+
+function payoutSummary() {
+  const total = payoutTotal();
+  const ok = Math.abs(total - 100) < 0.01;
+  const message = ok
+    ? "Die Payout-Prozente ergeben genau 100%."
+    : total < 100
+      ? `Noch ${fmt(100 - total)}% nicht verteilt.`
+      : `${fmt(total - 100)}% zu viel verteilt.`;
+  return `<p class="notice payout-summary ${ok ? "valid" : "invalid"}">Payout verteilt: ${fmt(total)}%. ${message}</p>`;
+}
+
+function tournamentAlerts() {
+  const t = state.tournament;
+  const alerts = [];
+  const level = t.levels[t.currentLevel];
+  if (!t.players.length) alerts.push("Noch keine Spieler im Turnier.");
+  if (t.players.length && !t.players.some((p) => p.active)) alerts.push("Alle Spieler sind als out markiert.");
+  if (num(t.rake) > num(t.buyIn)) alerts.push("Die Fee ist höher als der Buy-in.");
+  if (level && num(t.warningSeconds) >= num(level.minutes) * 60) alerts.push("Die Warnzeit ist länger als das aktuelle Level.");
+  if (Math.abs(payoutTotal() - 100) >= 0.01) alerts.push("Die Payout-Prozente ergeben nicht 100%.");
+  if (!alerts.length) return "";
+  return `<div class="alert-list">${alerts.map((item) => `<p class="alert">${escapeHtml(item)}</p>`).join("")}</div>`;
 }
 
 function cashResults() {
@@ -476,7 +689,9 @@ function historyList() {
 function bindEvents() {
   document.querySelectorAll("[data-path]").forEach((el) => {
     el.addEventListener("change", () => {
-      setPath(el.dataset.path, el.type === "checkbox" ? el.checked : parseMaybeNumber(el.value));
+      const value = el.type === "checkbox" ? el.checked : normalizeFieldValue(el.dataset.path, el.value);
+      setPath(el.dataset.path, value);
+      if (el.type === "number") el.value = value;
       if (el.dataset.path === "tournament.startingStack") syncTimerIfNeeded();
       render();
     });
@@ -485,8 +700,16 @@ function bindEvents() {
   document.querySelectorAll("[data-level]").forEach((el) => {
     el.addEventListener("change", () => {
       const level = state.tournament.levels[Number(el.dataset.level)];
-      level[el.dataset.field] = parseMaybeNumber(el.value);
-      if (Number(el.dataset.level) === state.tournament.currentLevel && el.dataset.field === "minutes") {
+      const field = el.dataset.field;
+      level[field] = normalizeLevelField(field, el.value);
+      if (field in levelNumberRules) el.value = level[field];
+      if (field === "type" && level.type === "break") {
+        level.smallBlind = 0;
+        level.bigBlind = 0;
+        level.ante = 0;
+        level.anteType = "none";
+      }
+      if (Number(el.dataset.level) === state.tournament.currentLevel && field === "minutes") {
         state.tournament.remainingSeconds = num(level.minutes) * 60;
       }
       render();
@@ -502,14 +725,20 @@ function bindEvents() {
 
   document.querySelectorAll("[data-payout]").forEach((el) => {
     el.addEventListener("change", () => {
-      state.tournament.payouts[Number(el.dataset.payout)][el.dataset.field] = parseMaybeNumber(el.value);
+      const payout = state.tournament.payouts[Number(el.dataset.payout)];
+      const field = el.dataset.field;
+      payout[field] = normalizePayoutField(field, el.value);
+      el.value = payout[field];
       render();
     });
   });
 
   document.querySelectorAll("[data-cash-player]").forEach((el) => {
     el.addEventListener("change", () => {
-      state.cashgame.players[Number(el.dataset.cashPlayer)][el.dataset.field] = parseMaybeNumber(el.value);
+      const player = state.cashgame.players[Number(el.dataset.cashPlayer)];
+      const field = el.dataset.field;
+      player[field] = normalizeCashPlayerField(field, el.value);
+      if (field in cashPlayerNumberRules) el.value = player[field];
       render();
     });
   });
@@ -532,13 +761,14 @@ function handleAction(el) {
   if (action === "toggleTimer") {
     unlockAudio();
     state.tournament.running = !state.tournament.running;
+    resetRuntimeClock();
   }
   if (action === "testSound") playLevelEndSound();
   if (action === "resetTimer") resetCurrentLevel();
   if (action === "nextLevel") moveLevel(1);
   if (action === "prevLevel") moveLevel(-1);
-  if (action === "addLevel") state.tournament.levels.push({ id: crypto.randomUUID(), name: "Level", minutes: 15, smallBlind: 100, bigBlind: 200, ante: 0, anteType: "none", type: "level" });
-  if (action === "addBreak") state.tournament.levels.push({ id: crypto.randomUUID(), name: "Pause", minutes: 10, smallBlind: 0, bigBlind: 0, ante: 0, anteType: "none", type: "break" });
+  if (action === "addLevel" && state.tournament.levels.length < MAX_LEVELS) state.tournament.levels.push({ id: makeId(), name: "Level", minutes: 15, smallBlind: 100, bigBlind: 200, ante: 0, anteType: "none", type: "level" });
+  if (action === "addBreak" && state.tournament.levels.length < MAX_LEVELS) state.tournament.levels.push({ id: makeId(), name: "Pause", minutes: 10, smallBlind: 0, bigBlind: 0, ante: 0, anteType: "none", type: "break" });
   if (action === "removeLevel") removeLevel(Number(el.dataset.index));
   if (action === "applyPreset") applyPreset(el.dataset.preset);
   if (action === "addPlayer") addPlayer();
@@ -546,11 +776,12 @@ function handleAction(el) {
   if (action === "togglePlayer") state.tournament.players[Number(el.dataset.index)].active = !state.tournament.players[Number(el.dataset.index)].active;
   if (action === "rebuyPlayer") addRebuy(Number(el.dataset.index));
   if (action === "addonPlayer") state.tournament.players[Number(el.dataset.index)].addons += 1;
-  if (action === "addPayout") state.tournament.payouts.push({ place: state.tournament.payouts.length + 1, percent: 0 });
+  if (action === "addPayout" && state.tournament.payouts.length < MAX_PAYOUTS) state.tournament.payouts.push({ place: state.tournament.payouts.length + 1, percent: 0 });
   if (action === "removePayout") state.tournament.payouts.splice(Number(el.dataset.index), 1);
   if (action === "toggleCashTimer") {
     unlockAudio();
     state.cashgame.running = !state.cashgame.running;
+    resetRuntimeClock();
   }
   if (action === "resetCashTimer") state.cashgame.elapsedSeconds = 0;
   if (action === "addCashPlayer") addCashPlayer();
@@ -575,6 +806,36 @@ function setPath(path, value) {
   target[keys[0]] = value;
 }
 
+function normalizeFieldValue(path, value) {
+  if (numberRules[path]) return clampNumber(value, numberRules[path]);
+  if (path.endsWith(".title")) return cleanText(value, path.startsWith("cashgame") ? "Cashgame" : "Turnier");
+  return parseMaybeNumber(value);
+}
+
+function normalizeLevelField(field, value) {
+  if (field in levelNumberRules) return clampInteger(value, levelNumberRules[field]);
+  if (field === "type") return normalizeChoice(value, ["level", "break"], "level");
+  if (field === "anteType") return normalizeChoice(value, ["none", "regular", "bb"], "none");
+  return value;
+}
+
+function normalizePayoutField(field, value) {
+  if (field in payoutNumberRules) return field === "place"
+    ? clampInteger(value, payoutNumberRules[field])
+    : clampNumber(value, payoutNumberRules[field]);
+  return value;
+}
+
+function normalizeCashPlayerField(field, value) {
+  if (field in cashPlayerNumberRules) return clampNumber(value, cashPlayerNumberRules[field]);
+  if (field === "name") return cleanText(value, "Spieler");
+  return value;
+}
+
+function resetRuntimeClock() {
+  lastTickAt = Date.now();
+}
+
 function syncTimerIfNeeded() {
   const level = state.tournament.levels[state.tournament.currentLevel];
   if (!state.tournament.running && level) state.tournament.remainingSeconds = num(level.minutes) * 60;
@@ -588,6 +849,7 @@ function applyPreset(key) {
   state.tournament.currentLevel = 0;
   state.tournament.remainingSeconds = state.tournament.levels[0].minutes * 60;
   state.tournament.running = false;
+  resetRuntimeClock();
 }
 
 function archiveTournament() {
@@ -599,7 +861,7 @@ function createTournamentSnapshot() {
   const tournament = structuredClone(state.tournament);
   tournament.running = false;
   return {
-    id: crypto.randomUUID(),
+    id: makeId(),
     app: "Poker Timer",
     type: "tournament-result",
     version: 1,
@@ -615,9 +877,10 @@ function createTournamentSnapshot() {
 function loadHistoryEntry(id) {
   const entry = history.find((item) => item.id === id);
   if (!entry?.tournament) return;
-  state.tournament = mergeDefaults(defaultState.tournament, structuredClone(entry.tournament));
+  state.tournament = normalizeTournament(mergeDefaults(defaultState.tournament, structuredClone(entry.tournament)));
   state.tournament.running = false;
   state.mode = "tournament";
+  resetRuntimeClock();
 }
 
 function removeHistoryEntry(id) {
@@ -663,14 +926,15 @@ function importData(data) {
     return;
   }
   if (data?.type === "tournament-result" && data.tournament) {
-    history = mergeHistory([data], history);
-    state.tournament = mergeDefaults(defaultState.tournament, structuredClone(data.tournament));
+    const normalized = normalizeHistoryEntry(data);
+    history = mergeHistory([normalized], history);
+    state.tournament = structuredClone(normalized.tournament);
     state.tournament.running = false;
     state.mode = "tournament";
     return;
   }
   if (data?.tournament) {
-    state.tournament = mergeDefaults(defaultState.tournament, structuredClone(data.tournament));
+    state.tournament = normalizeTournament(mergeDefaults(defaultState.tournament, structuredClone(data.tournament)));
     state.tournament.running = false;
     state.mode = "tournament";
     return;
@@ -688,18 +952,18 @@ function mergeHistory(imported, current) {
 }
 
 function normalizeHistoryEntry(entry) {
-  const tournament = mergeDefaults(defaultState.tournament, structuredClone(entry.tournament));
+  const tournament = normalizeTournament(mergeDefaults(defaultState.tournament, structuredClone(entry.tournament)));
   tournament.running = false;
   return {
-    id: entry.id || crypto.randomUUID(),
+    id: entry.id || makeId(),
     app: "Poker Timer",
     type: "tournament-result",
     version: 1,
-    title: entry.title || tournament.title || "Turnier",
-    createdAt: entry.createdAt || new Date().toISOString(),
-    prizePool: num(entry.prizePool) || calculatePrizePool(tournament),
-    playersTotal: num(entry.playersTotal) || tournament.players.length,
-    playersActive: num(entry.playersActive) || tournament.players.filter((p) => p.active).length,
+    title: cleanText(entry.title, tournament.title || "Turnier"),
+    createdAt: Number.isFinite(Date.parse(entry.createdAt)) ? entry.createdAt : new Date().toISOString(),
+    prizePool: clampNumber(entry.prizePool, { min: 0, max: 100000000, fallback: calculatePrizePool(tournament) }),
+    playersTotal: clampInteger(entry.playersTotal, { min: 0, max: MAX_PLAYERS, fallback: tournament.players.length }),
+    playersActive: clampInteger(entry.playersActive, { min: 0, max: MAX_PLAYERS, fallback: tournament.players.filter((p) => p.active).length }),
     tournament
   };
 }
@@ -730,14 +994,16 @@ function formatDateTime(value) {
 }
 
 function addPlayer() {
+  if (state.tournament.players.length >= MAX_PLAYERS) return;
   const input = document.querySelector("#new-player-name");
-  const name = input.value.trim() || `Spieler ${state.tournament.players.length + 1}`;
+  const name = cleanText(input.value, `Spieler ${state.tournament.players.length + 1}`);
   state.tournament.players.push(player(name));
 }
 
 function addCashPlayer() {
+  if (state.cashgame.players.length >= MAX_PLAYERS) return;
   const input = document.querySelector("#new-cash-name");
-  const name = input.value.trim() || `Spieler ${state.cashgame.players.length + 1}`;
+  const name = cleanText(input.value, `Spieler ${state.cashgame.players.length + 1}`);
   state.cashgame.players.push(cashPlayer(name, 0, 0));
 }
 
@@ -760,6 +1026,7 @@ function resetCurrentLevel() {
   const level = state.tournament.levels[state.tournament.currentLevel];
   state.tournament.remainingSeconds = num(level?.minutes) * 60;
   state.tournament.running = false;
+  resetRuntimeClock();
 }
 
 function moveLevel(delta) {
@@ -768,9 +1035,15 @@ function moveLevel(delta) {
   const level = state.tournament.levels[nextIndex];
   state.tournament.remainingSeconds = num(level.minutes) * 60;
   state.tournament.running = false;
+  resetRuntimeClock();
 }
 
 function advanceLevel() {
+  if (state.tournament.currentLevel >= state.tournament.levels.length - 1) {
+    state.tournament.remainingSeconds = 0;
+    state.tournament.running = false;
+    return;
+  }
   state.tournament.currentLevel += 1;
   const level = state.tournament.levels[state.tournament.currentLevel];
   state.tournament.remainingSeconds = num(level.minutes) * 60;
@@ -789,23 +1062,63 @@ function calculatePrizePool(t) {
 }
 
 function tick() {
-  if (state.tournament.running) {
-    state.tournament.remainingSeconds -= 1;
-    if (state.tournament.remainingSeconds === state.tournament.warningSeconds && state.tournament.sound) playWarningSound();
-    if (state.tournament.remainingSeconds <= 0) {
-      if (state.tournament.sound) playLevelEndSound();
-      if (state.tournament.currentLevel < state.tournament.levels.length - 1) advanceLevel();
-      else state.tournament.running = false;
+  if (!state.tournament.running && !state.cashgame.running) return;
+  const delta = elapsedWholeSeconds();
+  if (delta <= 0) return;
+
+  if (state.tournament.running) advanceTournamentBy(state.tournament, delta, state.tournament.sound);
+  if (state.cashgame.running) advanceCashgameBy(state.cashgame, delta, true);
+  render();
+}
+
+function elapsedWholeSeconds() {
+  const now = Date.now();
+  const delta = Math.floor((now - lastTickAt) / 1000);
+  if (delta > 0) lastTickAt += delta * 1000;
+  return delta;
+}
+
+function advanceTournamentBy(t, seconds, soundEnabled) {
+  let remainingDelta = Math.max(0, Math.floor(seconds));
+  let playedEndSound = false;
+
+  while (remainingDelta > 0 && t.running) {
+    const before = Math.max(0, num(t.remainingSeconds));
+    const after = before - remainingDelta;
+    const warning = num(t.warningSeconds);
+
+    if (soundEnabled && warning > 0 && before > warning && after <= warning) playWarningSound();
+
+    if (after > 0) {
+      t.remainingSeconds = after;
+      break;
     }
-    render();
-  }
-  if (state.cashgame.running) {
-    state.cashgame.elapsedSeconds += 1;
-    if (state.cashgame.timerMinutes > 0 && state.cashgame.elapsedSeconds >= state.cashgame.timerMinutes * 60) {
-      state.cashgame.running = false;
+
+    if (soundEnabled && !playedEndSound) {
       playLevelEndSound();
+      playedEndSound = true;
     }
-    render();
+
+    remainingDelta = Math.abs(after);
+    if (t.currentLevel < t.levels.length - 1) {
+      t.currentLevel += 1;
+      const level = t.levels[t.currentLevel];
+      t.remainingSeconds = num(level.minutes) * 60;
+      t.running = true;
+    } else {
+      t.remainingSeconds = 0;
+      t.running = false;
+    }
+  }
+}
+
+function advanceCashgameBy(c, seconds, soundEnabled) {
+  c.elapsedSeconds = Math.max(0, num(c.elapsedSeconds) + Math.max(0, Math.floor(seconds)));
+  const limit = num(c.timerMinutes) * 60;
+  if (limit > 0 && c.elapsedSeconds >= limit) {
+    c.elapsedSeconds = limit;
+    c.running = false;
+    if (soundEnabled) playLevelEndSound();
   }
 }
 
@@ -909,3 +1222,5 @@ function escapeHtml(value) {
 
 render();
 startTicking();
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+window.addEventListener("focus", tick);

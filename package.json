@@ -5,6 +5,7 @@
   "description": "Lokaler Poker-Timer fuer Homegames, Turniere und Cashgames.",
   "scripts": {
     "start": "python3 -m http.server 4174 --bind 127.0.0.1",
-    "serve": "python3 -m http.server 4174 --bind 127.0.0.1"
+    "serve": "python3 -m http.server 4174 --bind 127.0.0.1",
+    "check": "node --check app.js"
   }
 }

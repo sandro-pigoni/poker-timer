@@ -402,10 +402,44 @@ td select {
   line-height: 1.45;
 }
 
+.alert-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.alert {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 62%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent-2) 12%, var(--panel));
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.payout-summary {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+}
+
+.payout-summary.valid {
+  border-color: color-mix(in srgb, var(--accent) 66%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+}
+
+.payout-summary.invalid {
+  border-color: color-mix(in srgb, var(--danger) 64%, var(--line));
+  background: color-mix(in srgb, var(--danger) 10%, var(--panel));
+  color: var(--text);
+}
+
 .tv .topbar,
 .tv .setup,
-.tv .secondary-panels,
-.tv .timer-controls .soft-control {
+.tv .secondary-panels {
   display: none;
 }
 
